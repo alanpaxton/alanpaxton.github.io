@@ -1,0 +1,9 @@
+{
+    "applinks": {
+        "apps": [],
+        "details": [{
+            "appID": "3399LT9ZH5.com.360siteview.LiveStreaming",
+            "paths": ["/meeting/*"]
+        }]
+    }
+}
