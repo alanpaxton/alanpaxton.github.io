@@ -269,11 +269,11 @@ So stage (2) costs us a copy into a `std::string`. But! It's just a naive `std::
 
 Luckily this is easy to fix. In the Java API (JNI) implementation:
 
- 1 Create a PinnableSlice() which uses its own default backing buffer.
- 2 Call `DB::Get()` using the `PinnableSlice` variant of the RocksDB API
- 3 Copy the data indicated by the `PinnableSlice` straight into the Java output buffer using the JNI `SetByteArrayRegion()` method, then release the slice.
- 3 Work out if the slice has successfully pinned data, in which case copy the pinned data straight into the Java output buffer using the JNI `SetByteArrayRegion()` method, then release the pin.
- 4 ..or, if the slice has not pinned data, it is in the pinnable slice's default backing buffer. All that is left, is to copy it straight into the Java output buffer using the JNI SetByteArrayRegion() method.
+ 1. Create a PinnableSlice() which uses its own default backing buffer.
+ 2. Call `DB::Get()` using the `PinnableSlice` variant of the RocksDB API
+ 3. Copy the data indicated by the `PinnableSlice` straight into the Java output buffer using the JNI `SetByteArrayRegion()` method, then release the slice.
+ 4. Work out if the slice has successfully pinned data, in which case copy the pinned data straight into the Java output buffer using the JNI `SetByteArrayRegion()` method, then release the pin.
+ 5. ..or, if the slice has not pinned data, it is in the pinnable slice's default backing buffer. All that is left, is to copy it straight into the Java output buffer using the JNI SetByteArrayRegion() method.
 
 In the case where the `PinnableSlice` has succesfully pinned the data, this saves us the intermediate copy to the `std::string`. In the case where it hasn't, we still have the extra copy so the observed performance improvement depends on when the data can be pinned. Luckily, our benchmarking suggests that the pin is happening in a significant number of cases.
 
