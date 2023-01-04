@@ -7,12 +7,7 @@ Evolved Binary has been working on several aspects of how the Java API to RocksD
 * We have made some opportunistic performance optimizations/fixes within the Java API which have already yielded noticable improvements.
 
 ## Synthetic JNI API Performance Benchmarks
-The synthetic benchmark repository contains JMH tests designed to isolate the Java to/from C++ interaction of a canonical data intensive Key/Value Store implemented in C++ with a Java (JNI) API layered on top.
-
-Our `Get` tests consist of
- * Call from Java requesting a *value* for a *key* into a type of *buffer*
- * In C++, copy the required value into the buffer
- * Return to Java, and consume the buffer in Java
+The synthetic benchmark repository contains tests designed to isolate the Java to/from C++ interaction of a canonical data intensive Key/Value Store implemented in C++ with a Java (JNI) API layered on top.
 
 JNI provides several mechanisms for allowing transfer of data between Java buffers and C++ buffers. These mechanisms are not trivial, because they require the JNI system to ensure that Java memory under the control of the JVM is not moved or garbage collected whilst it is being accessed outside the direct control of the JVM.
 
@@ -24,9 +19,9 @@ We summarise this work here:
 
 ### The Model
 
-- In `C++` we represent the on-disk data as an in-memory map of `(key, value)`
+* In `C++` we represent the on-disk data as an in-memory map of `(key, value)`
   pairs.
-- For a fetch query, we expect the result to be a Java object with access to the
+* For a fetch query, we expect the result to be a Java object with access to the
   contents of the _value_. This may be a standard Java object which does the job
   of data access (a `byte[]` or a `ByteBuffer`) or an object of our own devising
   which holds references to the value in some form (a `FastBuffer` pointing to
@@ -48,14 +43,14 @@ byte[]
 There are 3 different mechanisms for transferring data between a `byte[]` and
 C++
 
-- At the C++ side, the method
+* At the C++ side, the method
   [`JNIEnv.GetArrayCritical()`](https://docs.oracle.com/en/java/javase/13/docs/specs/jni/functions.html#getprimitivearraycritical)
   allows access to a C++ pointer to the underlying array.
-- The `JNIEnv` methods `GetByteArrayElements()` and `ReleaseByteArrayElements()`
+* The `JNIEnv` methods `GetByteArrayElements()` and `ReleaseByteArrayElements()`
   fetch references/copies to and from the contents of a byte array, with less
   concern for critical sections than the _critical_ methods, though they are
   consequently more likely/certain to result in (extra) copies.
-- The `JNIEnv` methods `GetByteArrayRegion()` and `SetByteArrayRegion()`
+* The `JNIEnv` methods `GetByteArrayRegion()` and `SetByteArrayRegion()`
   transfer raw C++ buffer data to and from the contents of a byte array. These
   must ultimately do some data pinning for the duration of copies; the
   mechanisms may be similar or different to the _critical_ operations, and
@@ -102,43 +97,40 @@ space was allocated.
 Our `FastBuffer` class provides access to unsafe memory from the Java side.
 
 
-### Summary Results
-
-
-
 #### Allocation
 
 For these benchmarks, allocation has been excluded from the benchmark costs by
 pre-allocating a quantity of buffers of the appropriate kind as part of the test
-setup. Each run of the benchmark grabs an existing buffer from the pre-allocated
-FIFO list which has been set up, and returns it afterwards. We ran a small test
-to confirm that the request and return cycle is of insignficant cost compared to
+setup. Each run of the benchmark acquires an existing buffer from a pre-allocated
+FIFO list, and returns it afterwards. A small test
+confirmed that the request and return cycle is of insignificant cost compared to
 the benchmark API call.
 
 ### GetJNIBenchmark
 
 These benchmarks are distilled to be a measure of
 
-- Carry key across the JNI boundary
+- Carry key across the JNI boundary frm Java
 - Look key up in C++
 - Get the resulting value into the supplied buffer
 - Carry the result back across the JNI boundary
 
+Benchmarks ran for a duration of order 6 hours on an otherwise unloaded VM,
+  the error bars are small and we can have strong confidence in the values
+  derived and plotted.
+
 Comparing all the benchmarks as the data size tends large, the conclusions we
 can draw are:
 
-- Benchmarks ran for a duration of order 6 hours on an otherwise unloaded VM,
-  the error bars are small and we can have strong confidence in the values
-  derived and plotted.
-- `GetElements` methods for transferring data from C++ to Java are consistently
-  less efficient than other methods.
-- Indirect byte buffers are pointless; they are just an overhead on plain
+- Indirect byte buffers add cost; they are effectively an overhead on plain
   `byte[]` and the JNI-side only allows them to be accessed via their
   encapsulated `byte[]`.
 - `SetRegion` and `GetCritical` mechanisms for copying data into a `byte[]` are
   of very comparable performance; presumably the behaviour behind the scenes of
   `SetRegion` is very similar to that of declaring a critical region, doing a
   `memcpy()` and releasing the critical region.
+- `GetElements` methods for transferring data from C++ to Java are consistently
+  less efficient than `SetRegion` and `GetCritical`.
 - Getting into a raw memory buffer, passed as an address (the `handle` of an
   `Unsafe` or of a netty `ByteBuf`) is of similar cost to the more efficient
   `byte[]` operations.
@@ -152,7 +144,7 @@ can draw are:
 At small(er) data sizes, we can see whether other factors are important.
 
 - Indirect byte buffers are the most significant overhead here. Again, we can
-  conclude that we want to discount them entirely.
+  conclude that this is due to pure overhead compared to `byte[]` operations.
 - At the lowest data sizes, netty `ByteBuf`s and unsafe memory are marginally
   more efficient than `byte[]`s or (slightly less efficient) direct
   `nio.Bytebuffer`s. This may perhaps be explained by even the small cost of
@@ -179,16 +171,19 @@ of result.
 
 ![Copy out JNI Get - TODO - replace the plots](./analysis/get_benchmarks/fig_1024_1_copyout_nopoolbig.png).
 
-#### Conclusion
+### PutJNIBenchmark
+
+We benchmarked `Put` methods in a similar synthetic fashion. Similar conclusions apply; using `GetElements` is the least-performance way of implementing transfers to/from Java objects in C++/JNI.
+
+## Lessons from Synthetic API
 
 Performance analysis shows that for `get()`, fetching into allocated `byte[]` is
-just as efficient as any other mechanism. Copying out or otherwise using the
+equally as efficient as any other mechanism. Copying out or otherwise using the
 result is straightforward and efficient. Using `byte[]` avoids the manual memory
 management required with direct `nio.ByteBuffer`s, which extra work does not
 appear to provide any gain. A C++ implementation using the `GetRegion` JNI
 method is probably to be preferred to using `GetCritical` because while their
-performance is equal, `GetRegion` abstracts slightly further the operations we
-want to use.
+performance is equal, `GetRegion` is a higher-level/simpler abstraction.
 
 Vitally, whatever JNI transfer mechanism is chosen, the buffer allocation
 mechanism and pattern is crucial to achieving good performance. We experimented
@@ -202,20 +197,35 @@ be done in bulk, using array copy or buffer copy mechanisms. Thought should
 perhaps be given to supporting common transformations in the underlying C++
 layer.
 
+## Recommendations
 
-
-
-## Lessons from Synthetic API
-
-Of course there is some noise within the results that needs to be ignored (there always is). To the first order, some basic rules about (Java) performance hold:
+Of course there is some noise within the results. but we can agree:
 
  * Don't make copies you don't need to make
  * Don't allocate/deallocate when you can avoid it
  
 Translating this into designing an efficient API, we want to:
 
-Line everything up so that we make 1, and just 1, transfer between a Java buffer and a native buffer.
-Provide a sufficiently large result buffer at the Java side, so that get() methods don't have to allocate buffers.
-Go to the trouble of providing additional API methods where you supply the destination buffer; it's easier to use a method that magics you up a new buffer, but it's far less efficient
-Recycle your Java input buffers, reusing them for subsequent API calls
-or make sure that you are supplying the ultimate destination buffer (your cache, or a target network buffer) as input to the get()
+ * Support API methods that return results in buffers supplied by the client.
+ * Support `byte[]`-based APIs as the simplest way of getting data into a usable configuration for a broad range of Java use.
+ * Support direct `ByteBuffer`s as these can reduce copies when used as part of a chain of `ByteBuffer`-based operations. This sort of sohpisticated streaming model is most likely to be used by clients where performance is important, and so we decide to support it.
+ * Support indirect `ByteBuffer`s for a combination of reasons:
+   * API consistency between direct and indirect buffers
+   * Simplicity of implementation, as we can wrap `byte[]`-oriented methods
+ * Continue to support methods which allocate return buffers per-call, as these are the easiest to use on initial encounter with the RocksDB API.
+
+High performance Java interaction with RocksDB ultimately requires architectural decisions by the client 
+ * Use more complex API methods where performance matters
+ * Don't allocate/deallocate where you don't need to
+   * recycle your own buffers where this makes sense
+   * or make sure that you are supplying the ultimate destination buffer (your cache, or a target network buffer) as input to RockSDB `get()` and `put()` calls
+
+## Optimizations
+
+### Saving between 0 and 1 Copies
+
+Having analysed JNI performance as described, we reviewed the core of RocksJNI for opportunities to improve the performance. We noticed one thing in particular; some of the `get()` methods of the Java API had not been updated to take advantage of the new [`PinnableSlice`](http://rocksdb.org/blog/2017/08/24/pinnableslice.html) methods.
+
+Fixing this turned out to be a straightforward change, which has now been incorporated in the codebase [Improve Java API `get()` performance by reducing copies](https://github.com/facebook/rocksdb/pull/10970)
+
+#### Performance Results
