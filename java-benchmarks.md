@@ -34,11 +34,7 @@ are unsurprisingly quite connected underneath.
 
 #### Byte Array
 
-The simplest data container is a _raw_ array of bytes.
-
-```java
-byte[]
-```
+The simplest data container is a _raw_ array of bytes (`byte[]`).
 
 There are 3 different mechanisms for transferring data between a `byte[]` and
 C++
@@ -58,13 +54,9 @@ C++
 
 #### Byte Buffer
 
-This container abstracts the contents of a collection of bytes, and was in fact
+A `ByterBuffer` abstracts the contents of a collection of bytes, and was in fact
 introduced to support a range of higher-performance I/O operations in some
 circumstances.
-
-```java
-ByteBuffer
-```
 
 There are 2 types of byte buffers in Java, _indirect_ and _direct_. Indirect
 byte buffers are the standard, and the memory they use is on-heap as with all
@@ -94,7 +86,7 @@ C++ side by calling `JNIEnv.NewDirectByteBuffer()`, or simple use it as a native
 C++ buffer at the expected address, assuming we record or remember how much
 space was allocated.
 
-Our `FastBuffer` class provides access to unsafe memory from the Java side.
+Our custom `FastBuffer` class provides access to unsafe memory from the Java side.
 
 
 #### Allocation
@@ -136,8 +128,8 @@ can draw are:
   `byte[]` operations.
 - Getting into a direct `nio.ByteBuffer` is of similar cost again; while the
   ByteBuffer is passed over JNI as an ordinary Java object, JNI has a specific
-  method for getting hold of the address of the direct buffer, and this done the
-  `get()` cost is effectively that of the `memcpy()`.
+  method for getting hold of the address of the direct buffer, and using this, the
+  `get()` cost with a ByteBuffer is just that of the underlying C++ `memcpy()`.
 
 ![Raw JNI Get](./analysis/get_benchmarks/fig_1024_1_none_nopoolbig.png).
 
@@ -179,7 +171,7 @@ We benchmarked `Put` methods in a similar synthetic fashion. Similar conclusions
 
 Performance analysis shows that for `get()`, fetching into allocated `byte[]` is
 equally as efficient as any other mechanism. Copying out or otherwise using the
-result is straightforward and efficient. Using `byte[]` avoids the manual memory
+result on the Java side is straightforward and efficient. Using `byte[]` avoids the manual memory
 management required with direct `nio.ByteBuffer`s, which extra work does not
 appear to provide any gain. A C++ implementation using the `GetRegion` JNI
 method is probably to be preferred to using `GetCritical` because while their
@@ -197,7 +189,7 @@ be done in bulk, using array copy or buffer copy mechanisms. Thought should
 perhaps be given to supporting common transformations in the underlying C++
 layer.
 
-## Recommendations
+## API Recommendations
 
 Of course there is some noise within the results. but we can agree:
 
@@ -215,17 +207,88 @@ Translating this into designing an efficient API, we want to:
  * Continue to support methods which allocate return buffers per-call, as these are the easiest to use on initial encounter with the RocksDB API.
 
 High performance Java interaction with RocksDB ultimately requires architectural decisions by the client 
- * Use more complex API methods where performance matters
+ * Use more complex (client supplied buffer) API methods where performance matters
  * Don't allocate/deallocate where you don't need to
    * recycle your own buffers where this makes sense
    * or make sure that you are supplying the ultimate destination buffer (your cache, or a target network buffer) as input to RockSDB `get()` and `put()` calls
 
+We are now implementing a number of extra methods consistently across the Java fetch and store APIs to RocksDB in the PR [Java API consistency between RocksDB.put() , .merge() and Transaction.put() , .merge()](https://github.com/facebook/rocksdb/pull/11019) according to these principles.
+
 ## Optimizations
 
-### Saving between 0 and 1 Copies
+### Reduce Copies within API Implementation
 
 Having analysed JNI performance as described, we reviewed the core of RocksJNI for opportunities to improve the performance. We noticed one thing in particular; some of the `get()` methods of the Java API had not been updated to take advantage of the new [`PinnableSlice`](http://rocksdb.org/blog/2017/08/24/pinnableslice.html) methods.
 
 Fixing this turned out to be a straightforward change, which has now been incorporated in the codebase [Improve Java API `get()` performance by reducing copies](https://github.com/facebook/rocksdb/pull/10970)
 
 #### Performance Results
+
+Using the JMH performances tests we updated as part of the above PR, we can see a small but consistent improvement in performance for all of the different get method variants which we have enhanced in the PR.
+
+```sh
+java -jar target/rocksdbjni-jmh-1.0-SNAPSHOT-benchmarks.jar -p keyCount=1000,50000 -p keySize=128 -p valueSize=1024,16384 -p columnFamilyTestType="1_column_family" GetBenchmarks.get GetBenchmarks.preallocatedByteBufferGet GetBenchmarks.preallocatedGet
+``
+
+![image](./analysis/optimization-graph.png)
+
+### Analysis
+
+Before the invention of the Pinnable Slice the simplest RocksDB (native) API `Get()` looked like this:
+
+```cpp
+Status Get(const ReadOptions& options,
+                           ColumnFamilyHandle* column_family, const Slice& key,
+                           std::string* value)
+```
+ 
+After PinnableSlice the correct way for new code to implement a `get()` is like this
+ 
+```cpp
+Status Get(const ReadOptions& options,
+                    ColumnFamilyHandle* column_family, const Slice& key,
+                    PinnableSlice* value)
+```
+
+But of course RocksDB has to support legacy code, so there is an `inline` method in `db.h` which re-implements the former using the latter.
+And RocksJava API implementation seamlessly continues to use the `std::string`-based `get()`
+
+Let's examine what happens when get() is called from Java
+
+```cpp
+jint Java_org_rocksdb_RocksDB_get__JJ_3BII_3BIIJ(
+   JNIEnv* env, jobject, jlong jdb_handle, jlong jropt_handle, jbyteArray jkey,
+   jint jkey_off, jint jkey_len, jbyteArray jval, jint jval_off, jint jval_len,
+   jlong jcf_handle)
+```
+
+ 1. Create an empty `std::string value`
+ 2. Call `DB::Get()` using the `std::string` variant
+ 3. Copy the resultant `std::string` into Java, using the JNI `SetByteArrayRegion()` method
+ 
+So stage (3) costs us a copy into Java. That's mostly unavoidable, and so we shan't cry too hard about it.
+
+Digging a little deeper, what does stage 2 do ?
+
+Create a `PinnableSlice(std::string&)` which uses the value as the slice's backing buffer.
+Call `DB::Get()` using the PinnableSlice variant
+Work out if the slice has pinned data, in which case copy the pinned data into value and release it.
+..or, if the slice has not pinned data, it is already in value (because we tried, but couldn't pin anything).
+
+So stage (2) costs us a copy into a `std::string`. But! It's just a naive `std::string` that we have copied a large buffer into. And in RocksDB, the buffer is or can be large, and we believe performance is something we need to worry about.
+
+Luckily this is easy to fix. In the Java API (JNI) implementation:
+
+ 1 Create a PinnableSlice() which uses its own default backing buffer.
+ 2 Call `DB::Get()` using the PinnableSlice variant of the RocksDB API
+ 3 Work out if the slice has successfully pinned data, in which case copy the pinned data straight into the Java output buffer using the JNI SetByteArrayRegion() method, then release the pin.
+..or, if the slice has not pinned data, it is in the pinnable slice's default backing buffer. All that is left, is to copy it straight into the Java output buffer using the JNI SetByteArrayRegion() method.
+
+By doing this, we have reduced the overhead to 1 single copy if the `PinnableSlice` came back with some pinned data (e.g. if it's in the RocksDB cache, or has just been loaded there).
+It's still the same cost if the pin did not happen, but our benchmarking suggests that the pin is happening in a significant number of cases.
+
+On discussion with the RocksDB core team we understand that the core `PinnableSlice` optimization is most likely to succeed when pages are loaded from the buffer cache, rather than when they are in `memtable`. There is also a suggestion that with some coding effort, it might be possible to successfully pin in the buffer cache as well. This would likely improve the results for these benchmarks.
+
+
+
+
