@@ -76,17 +76,13 @@ and measured using
 
 #### Unsafe Memory
 
-```java
-com.sun.unsafe.Unsafe.allocateMemory()
-```
-
-The call returns a handle which is (of course) just a pointer to raw memory, and
+The call `com.sun.unsafe.Unsafe.allocateMemory()` returns a handle which is (of course) just a pointer to raw memory, and
 can be used as such on the C++ side. We could turn it into a byte buffer on the
-C++ side by calling `JNIEnv.NewDirectByteBuffer()`, or simple use it as a native
+C++ side by calling `JNIEnv.NewDirectByteBuffer()`, or simply use it as a native
 C++ buffer at the expected address, assuming we record or remember how much
 space was allocated.
 
-Our custom `FastBuffer` class provides access to unsafe memory from the Java side.
+A custom `FastBuffer` class provides access to unsafe memory from the Java side.
 
 
 #### Allocation
@@ -94,22 +90,17 @@ Our custom `FastBuffer` class provides access to unsafe memory from the Java sid
 For these benchmarks, allocation has been excluded from the benchmark costs by
 pre-allocating a quantity of buffers of the appropriate kind as part of the test
 setup. Each run of the benchmark acquires an existing buffer from a pre-allocated
-FIFO list, and returns it afterwards. A small test
+FIFO list, and returns it afterwards. A small test has
 confirmed that the request and return cycle is of insignificant cost compared to
 the benchmark API call.
 
-### GetJNIBenchmark
-
-These benchmarks are distilled to be a measure of
-
-- Carry key across the JNI boundary frm Java
-- Look key up in C++
-- Get the resulting value into the supplied buffer
-- Carry the result back across the JNI boundary
+### GetJNIBenchmark Performance
 
 Benchmarks ran for a duration of order 6 hours on an otherwise unloaded VM,
   the error bars are small and we can have strong confidence in the values
   derived and plotted.
+
+![Raw JNI Get](./analysis/get_benchmarks/fig_1024_1_none_nopoolbig.png).
 
 Comparing all the benchmarks as the data size tends large, the conclusions we
 can draw are:
@@ -131,19 +122,17 @@ can draw are:
   method for getting hold of the address of the direct buffer, and using this, the
   `get()` cost with a ByteBuffer is just that of the underlying C++ `memcpy()`.
 
-![Raw JNI Get](./analysis/get_benchmarks/fig_1024_1_none_nopoolbig.png).
-
 At small(er) data sizes, we can see whether other factors are important.
+
+![Raw JNI Get](./analysis/get_benchmarks/fig_1024_1_none_nopoolsmall.png)
 
 - Indirect byte buffers are the most significant overhead here. Again, we can
   conclude that this is due to pure overhead compared to `byte[]` operations.
 - At the lowest data sizes, netty `ByteBuf`s and unsafe memory are marginally
   more efficient than `byte[]`s or (slightly less efficient) direct
-  `nio.Bytebuffer`s. This may perhaps be explained by even the small cost of
-  entering the JNI model in some fashion on the C++ side simply to acquire a
+  `nio.Bytebuffer`s. This may be explained by even the small cost of
+  calling the JNI model on the C++ side simply to acquire a
   direct buffer address. The margins (nanoseconds) here are extremely small.
-
-![Raw JNI Get](./analysis/get_benchmarks/fig_1024_1_none_nopoolsmall.png).
 
 #### Post processing the results
 
@@ -153,24 +142,25 @@ extra cost, but the aim is to model the least cost processing step for any kind
 of result.
 
 - Copying into a `byte[]` using the bulk methods supported by `byte[]`,
-  `nio.ByteBuffer` are comparable.
+  `nio.ByteBuffer` have comparable performance.
 - Accessing the contents of an `Unsafe` buffer using the supplied unsafe methods
-  is inefficient. The access is effectively byte by byte, or at best word by
+  is inefficient. The access is word by
   word, in Java.
 - Accessing the contents of a netty `ByteBuf` is similarly inefficient; again
-  the access is presumably byte by byte, or at best word by word, using normal
+  the access is presumably word by word, using normal
   Java mechanisms.
 
 ![Copy out JNI Get - TODO - replace the plots](./analysis/get_benchmarks/fig_1024_1_copyout_nopoolbig.png).
 
 ### PutJNIBenchmark
 
-We benchmarked `Put` methods in a similar synthetic fashion. Similar conclusions apply; using `GetElements` is the least-performance way of implementing transfers to/from Java objects in C++/JNI.
+We benchmarked `Put` methods in a similar synthetic fashion in less depth, but enough to confirm that the performance profile is similar/symmetrical. As with `get()` using `GetElements` is the least performant way of implementing transfers to/from Java objects in C++/JNI, and other JNI mechanisms do not differ greatly one from another.
 
 ## Lessons from Synthetic API
 
 Performance analysis shows that for `get()`, fetching into allocated `byte[]` is
-equally as efficient as any other mechanism. Copying out or otherwise using the
+equally as efficient as any other mechanism, as long as JNI region methods are used
+for the internal data transfer. Copying out or otherwise using the
 result on the Java side is straightforward and efficient. Using `byte[]` avoids the manual memory
 management required with direct `nio.ByteBuffer`s, which extra work does not
 appear to provide any gain. A C++ implementation using the `GetRegion` JNI
@@ -200,7 +190,7 @@ Translating this into designing an efficient API, we want to:
 
  * Support API methods that return results in buffers supplied by the client.
  * Support `byte[]`-based APIs as the simplest way of getting data into a usable configuration for a broad range of Java use.
- * Support direct `ByteBuffer`s as these can reduce copies when used as part of a chain of `ByteBuffer`-based operations. This sort of sohpisticated streaming model is most likely to be used by clients where performance is important, and so we decide to support it.
+ * Support direct `ByteBuffer`s as these can reduce copies when used as part of a chain of `ByteBuffer`-based operations. This sort of sophisticated streaming model is most likely to be used by clients where performance is important, and so we decide to support it.
  * Support indirect `ByteBuffer`s for a combination of reasons:
    * API consistency between direct and indirect buffers
    * Simplicity of implementation, as we can wrap `byte[]`-oriented methods
@@ -212,7 +202,7 @@ High performance Java interaction with RocksDB ultimately requires architectural
    * recycle your own buffers where this makes sense
    * or make sure that you are supplying the ultimate destination buffer (your cache, or a target network buffer) as input to RockSDB `get()` and `put()` calls
 
-We are now implementing a number of extra methods consistently across the Java fetch and store APIs to RocksDB in the PR [Java API consistency between RocksDB.put() , .merge() and Transaction.put() , .merge()](https://github.com/facebook/rocksdb/pull/11019) according to these principles.
+We are currently implementing a number of extra methods consistently across the Java fetch and store APIs to RocksDB in the PR [Java API consistency between RocksDB.put() , .merge() and Transaction.put() , .merge()](https://github.com/facebook/rocksdb/pull/11019) according to these principles.
 
 ## Optimizations
 
@@ -266,26 +256,26 @@ jint Java_org_rocksdb_RocksDB_get__JJ_3BII_3BIIJ(
  2. Call `DB::Get()` using the `std::string` variant
  3. Copy the resultant `std::string` into Java, using the JNI `SetByteArrayRegion()` method
  
-So stage (3) costs us a copy into Java. That's mostly unavoidable, and so we shan't cry too hard about it.
+So stage (3) costs us a copy into Java. It's mostly unavoidable that there will be at least the one copy from a C++ buffer into a Java buffer.
 
-Digging a little deeper, what does stage 2 do ?
+But what does stage 2 do ?
 
-Create a `PinnableSlice(std::string&)` which uses the value as the slice's backing buffer.
-Call `DB::Get()` using the PinnableSlice variant
-Work out if the slice has pinned data, in which case copy the pinned data into value and release it.
-..or, if the slice has not pinned data, it is already in value (because we tried, but couldn't pin anything).
+ * Create a `PinnableSlice(std::string&)` which uses the value as the slice's backing buffer.
+ * Call `DB::Get()` using the PinnableSlice variant
+ * Work out if the slice has pinned data, in which case copy the pinned data into value and release it.
+ * ..or, if the slice has not pinned data, it is already in value (because we tried, but couldn't pin anything).
 
-So stage (2) costs us a copy into a `std::string`. But! It's just a naive `std::string` that we have copied a large buffer into. And in RocksDB, the buffer is or can be large, and we believe performance is something we need to worry about.
+So stage (2) costs us a copy into a `std::string`. But! It's just a naive `std::string` that we have copied a large buffer into. And in RocksDB, the buffer is or can be large, so an extra copy something we need to worry about.
 
 Luckily this is easy to fix. In the Java API (JNI) implementation:
 
  1 Create a PinnableSlice() which uses its own default backing buffer.
- 2 Call `DB::Get()` using the PinnableSlice variant of the RocksDB API
- 3 Work out if the slice has successfully pinned data, in which case copy the pinned data straight into the Java output buffer using the JNI SetByteArrayRegion() method, then release the pin.
-..or, if the slice has not pinned data, it is in the pinnable slice's default backing buffer. All that is left, is to copy it straight into the Java output buffer using the JNI SetByteArrayRegion() method.
+ 2 Call `DB::Get()` using the `PinnableSlice` variant of the RocksDB API
+ 3 Copy the data indicated by the `PinnableSlice` straight into the Java output buffer using the JNI `SetByteArrayRegion()` method, then release the slice.
+ 3 Work out if the slice has successfully pinned data, in which case copy the pinned data straight into the Java output buffer using the JNI `SetByteArrayRegion()` method, then release the pin.
+ 4 ..or, if the slice has not pinned data, it is in the pinnable slice's default backing buffer. All that is left, is to copy it straight into the Java output buffer using the JNI SetByteArrayRegion() method.
 
-By doing this, we have reduced the overhead to 1 single copy if the `PinnableSlice` came back with some pinned data (e.g. if it's in the RocksDB cache, or has just been loaded there).
-It's still the same cost if the pin did not happen, but our benchmarking suggests that the pin is happening in a significant number of cases.
+In the case where the `PinnableSlice` has succesfully pinned the data, this saves us the intermediate copy to the `std::string`. In the case where it hasn't, we still have the extra copy so the observed performance improvement depends on when the data can be pinned. Luckily, our benchmarking suggests that the pin is happening in a significant number of cases.
 
 On discussion with the RocksDB core team we understand that the core `PinnableSlice` optimization is most likely to succeed when pages are loaded from the buffer cache, rather than when they are in `memtable`. There is also a suggestion that with some coding effort, it might be possible to successfully pin in the buffer cache as well. This would likely improve the results for these benchmarks.
 
