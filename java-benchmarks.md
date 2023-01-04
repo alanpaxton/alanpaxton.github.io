@@ -218,7 +218,7 @@ Using the JMH performances tests we updated as part of the above PR, we can see 
 
 ```sh
 java -jar target/rocksdbjni-jmh-1.0-SNAPSHOT-benchmarks.jar -p keyCount=1000,50000 -p keySize=128 -p valueSize=1024,16384 -p columnFamilyTestType="1_column_family" GetBenchmarks.get GetBenchmarks.preallocatedByteBufferGet GetBenchmarks.preallocatedGet
-``
+```
 
 ![image](./analysis/optimization-graph.png)
 
