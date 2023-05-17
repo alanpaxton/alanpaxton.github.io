@@ -4,6 +4,7 @@
 * fork the repo if you haven't already
 * git clone 
 * `./quick-build.sh`
+
 ```
 set -e
 
